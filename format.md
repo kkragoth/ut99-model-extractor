@@ -104,8 +104,17 @@ marker is what this decode targets.
 
 ## Import transform to actor-local space (pelvis at origin, Z up)
 
-    P = rotate((vert - MeshOrigin) by RotOrigin)      # UT FCoords rotation
-    P = P * MeshScale * DrawScale
+    P = (vert - MeshOrigin) * MeshScale              # scale first
+    P = P.TransformPointBy(RotCoords)                # then rotate by RotOrigin
+
+**Scale-then-rotate.** This matches the engine render path: the `GetFrame`
+coords chain applies `FScale(Scale)` inside the coords (scale applied first).
+The old rotate-then-scale formulation was WRONG for these meshes (their
+`RotOrigin = (0,16384,-16384)` maps raw X->world Z, raw Y(up)->world X,
+raw Z->world Y, so the mesh stands up along +Z). SurrealEngine's yaw sign is
+opposite to `Core\Inc\UnMath.h:1934` (`FCoords::operator*=(FRotator)`:
+Yaw->Pitch->Roll, yaw `XAxis=(+cos,+sin,0)`, `YAxis=(-sin,+cos,0)`) - use the
+engine's sign, not SurrealEngine's.
 
 ## References
 

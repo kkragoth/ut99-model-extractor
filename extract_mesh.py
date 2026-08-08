@@ -468,43 +468,73 @@ def parse_lod_mesh(pkg, exp_idx):
     )
 
 
+def _coords_mul(a, b):
+    """Compose two FCoords: b applied inside a, via FCoords::operator*= (Core/Inc/UnMath.h).
+
+    result.XAxis = dot(a.XAxis, b.XAxis/YAxis/ZAxis) etc.
+    """
+    d = lambda x, y: x[0] * y[0] + x[1] * y[1] + x[2] * y[2]
+    xa = (d(a[0], b[0]), d(a[0], b[1]), d(a[0], b[2]))
+    ya = (d(a[1], b[0]), d(a[1], b[1]), d(a[1], b[2]))
+    za = (d(a[2], b[0]), d(a[2], b[1]), d(a[2], b[2]))
+    return (xa, ya, za)
+
+
 def ut_rotation_matrix(rot):
-    """Build the UT FCoords rotation matrix (UnMath.cpp GMath.Rotation).
+    """Build the UT mesh RotOrigin FCoords (Core/Inc/UnMath.h FCoords::operator*=(FRotator)).
 
     rot = (pitch, yaw, roll) in Unreal rotation units (65536 = 360 deg).
-    Returns XAxis, YAxis, ZAxis row vectors; TransformPointBy(V) = V.X*XAxis + V.Y*YAxis + V.Z*ZAxis.
+    Applies Yaw, then Pitch, then Roll to UnitCoords, each via the engine's axis tables
+    (note the yaw sign: XAxis=(+cosY, +sinY, 0), YAxis=(-sinY, +cosY, 0)).
+    Returns XAxis, YAxis, ZAxis; TransformPointBy(P) = (P|XAxis, P|YAxis, P|ZAxis).
     """
     import math
-    cy, sy = math.cos(2 * math.pi * rot[1] / 65536), math.sin(2 * math.pi * rot[1] / 65536)
-    cp, sp = math.cos(2 * math.pi * rot[0] / 65536), math.sin(2 * math.pi * rot[0] / 65536)
-    cr, sr = math.cos(2 * math.pi * rot[2] / 65536), math.sin(2 * math.pi * rot[2] / 65536)
-    xa = (cy * cp, cy * sp * sr - sy * cr, -cy * sp * cr - sy * sr)
-    ya = (sy * cp, sy * sp * sr + cy * cr, -sy * sp * cr + cy * sr)
-    za = (sp, -cp * sr, cp * cr)
-    return xa, ya, za
+    u = 2 * math.pi / 65536
+    cy, sy = math.cos(rot[1] * u), math.sin(rot[1] * u)
+    cp, sp = math.cos(rot[0] * u), math.sin(rot[0] * u)
+    cr, sr = math.cos(rot[2] * u), math.sin(rot[2] * u)
+    unit = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    yaw = ((cy, sy, 0), (-sy, cy, 0), (0, 0, 1))
+    pitch = ((cp, 0, sp), (0, 1, 0), (-sp, 0, cp))
+    roll = ((1, 0, 0), (0, cr, -sr), (0, sr, cr))
+    return _coords_mul(_coords_mul(_coords_mul(unit, yaw), pitch), roll)
 
 
 def mesh_to_world(vert, m):
-    """Import transform (UnRagdollMesh.cpp): (vert - Origin) rotated by RotOrigin, then scaled."""
+    """Import transform: (vert - Origin) scaled, then rotated by RotOrigin.
+
+    Matches the engine render path: GetFrame builds Coords from RotOrigin and FScale(Scale),
+    applied to the raw (Origin-relative) verts. RotCoords = GMath.UnitCoords * RotOrigin;
+    P = (vert - Origin); world = P.Scale(Scale).TransformPointBy(RotCoords).
+    """
     xa, ya, za = ut_rotation_matrix(m.rot)
-    p = (vert[0] - m.origin[0], vert[1] - m.origin[1], vert[2] - m.origin[2])
-    r = (p[0] * xa[0] + p[1] * ya[0] + p[2] * za[0],
-         p[0] * xa[1] + p[1] * ya[1] + p[2] * za[1],
-         p[0] * xa[2] + p[1] * ya[2] + p[2] * za[2])
-    return (r[0] * m.scale[0], r[1] * m.scale[1], r[2] * m.scale[2])
+    p = ((vert[0] - m.origin[0]) * m.scale[0],
+         (vert[1] - m.origin[1]) * m.scale[1],
+         (vert[2] - m.origin[2]) * m.scale[2])
+    r = (p[0] * xa[0] + p[1] * xa[1] + p[2] * xa[2],
+         p[0] * ya[0] + p[1] * ya[1] + p[2] * ya[2],
+         p[0] * za[0] + p[1] * za[1] + p[2] * za[2])
+    return r
 
 
-def export_obj(pkg, m, out_path, frame=0):
+def export_obj(pkg, m, out_path, frame=0, fit=None):
     """Write one frame of the mesh as a Wavefront OBJ (one position per wedge, faces by wedge).
 
     Wedge iVertex is a MODEL-vert index (excludes SpecialVerts); add SpecialVerts
     to get the index into each frame's vertex block (umodel Wedges[i].iVertex += SpecialVerts).
     Frame verts are laid out frame-major: verts[f * FrameVerts .. (f+1) * FrameVerts).
+
+    fit: optional uniform scale (the native ragdoll FitScale = SkeletonBodyLen/LongAxis,
+    UnRagdollMesh.cpp:265) applied after the import transform so the mesh matches the
+    skeleton boxes exactly.
     """
     world = [mesh_to_world(v, m) for v in m.verts]
+    if fit is not None:
+        world = [(x * fit, y * fit, z * fit) for x, y, z in world]
     base = frame * m.frame_verts
     with open(out_path, "w") as f:
-        f.write(f"# {m.name} frame {frame}/{m.anim_frames} ({len(m.wedges)} wedges, {len(m.faces)} faces)\n")
+        f.write(f"# {m.name} frame {frame}/{m.anim_frames} ({len(m.wedges)} wedges, {len(m.faces)} faces)"
+                + (f", fit={fit:.4f}" if fit is not None else "") + "\n")
         for w in m.wedges:
             px, py, pz = world[base + w[0] + m.special_verts]
             f.write(f"v {px:.3f} {py:.3f} {pz:.3f}\n")
@@ -512,7 +542,8 @@ def export_obj(pkg, m, out_path, frame=0):
             f.write(f"vt {w[1] / 255.0:.4f} {w[2] / 255.0:.4f}\n")
         for fa in m.faces:
             f.write(f"f {fa[0] + 1}/{fa[0] + 1} {fa[1] + 1}/{fa[1] + 1} {fa[2] + 1}/{fa[2] + 1}\n")
-    print(f"  wrote {out_path} ({len(m.wedges)} verts, {len(m.faces)} faces, frame {frame})")
+    print(f"  wrote {out_path} ({len(m.wedges)} verts, {len(m.faces)} faces, frame {frame}"
+          + (f", fit={fit:.4f}" if fit is not None else "") + ")")
 
 
 def main(path):
@@ -543,7 +574,11 @@ def main(path):
     if len(sys.argv) > 3 and sys.argv[3] == "--obj":
         frame = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4].lstrip("-").isdigit() else 0
         out = sys.argv[5] if len(sys.argv) > 5 else "mesh.obj"
-        export_obj(pkg, m, out, frame=frame)
+        fit = None
+        if "--fit" in sys.argv:
+            i = sys.argv.index("--fit")
+            fit = float(sys.argv[i + 1]) if len(sys.argv) > i + 1 else 1.0
+        export_obj(pkg, m, out, frame=frame, fit=fit)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,10 @@ Requires Python 3.8+, **no third-party dependencies** (stdlib only).
     # Export an animation frame to OBJ (frame defaults to 0)
     python extract_mesh.py Botpack.u 3251 --obj 25 commando_breath.obj
 
+    # Export with a fit scale (native ragdoll FitScale = SkeletonBodyLen/LongAxis,
+    # e.g. 0.9458 for Commando Look f96) so the mesh matches the physics skeleton
+    python extract_mesh.py Botpack.u 3251 --obj 96 commando_stand.obj --fit 0.9458
+
     # Dump every serialized field + file offset of a mesh blob (debug)
     python mesh_blob.py Botpack.u 3251
 
@@ -29,8 +33,11 @@ Requires Python 3.8+, **no third-party dependencies** (stdlib only).
   field order and every gotcha (RotOrigin is 3x INT32, FBox is 25 bytes,
   FMeshVert is a packed 11/11/10-bit int, wedge `iVertex` excludes
   `SpecialVerts`, ...).
-- World-space mesh transform: `(vert - Origin)` rotated by `RotOrigin`, then
-  scaled by `MeshScale` (rotate-then-scale, matching UT's FCoords math).
+- World-space mesh transform: `(vert - Origin)` scaled by `MeshScale`, then
+  rotated by `RotOrigin` (**scale-then-rotate** - matches the engine GetFrame
+  coords chain, `FCoords::operator*=(FRotator)` in `Core/Inc/UnMath.h:1934`).
+  Note: SurrealEngine's yaw sign is opposite the real engine; use the engine's.
+  See `format.md` and `docs/mesh-extractor-findings.md` for the details.
 
 ## Validation
 
@@ -43,9 +50,11 @@ Commando mesh.
 ## File layout
 
     extract_mesh.py   decoder + CLI (UTPackage, parse_mesh_blob, parse_lod_mesh,
-                      mesh_to_world, export_obj)
+                      mesh_to_world, export_obj [--fit])
     mesh_blob.py      debug field/offset dumper
     format.md         the proven v436 ULodMesh on-disk layout
+    docs/             session findings (transform math, FitScale, player-select
+                      Selection* meshes, skeleton overlay yaw rule, ...)
 
 ## References
 
